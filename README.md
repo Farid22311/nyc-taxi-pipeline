@@ -16,8 +16,57 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 ## Status
 
 Week 1: Postgres running via Docker Compose
+Week 1 is Done
 
 ## How to run
 
-Coming soon.
+### Prerequisites
+- Docker Desktop (running)
+- Python 3.13
+- Git
 
+### 1. Clone and set up Python
+```powershell
+git clone https://github.com/Farid22311/nyc-taxi-pipeline.git
+cd nyc-taxi-pipeline
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### 2. Configure credentials
+```powershell
+Copy-Item .env.example .env
+```
+Open .env and set POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB to values of your choice. Never commit .env.
+
+### 3. Download the data
+Create the folder and download the file:
+```powershell
+mkdir data
+```
+From the [TLC Trip Record Data page](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page), download the **Yellow Taxi Trip Records** Parquet file for **August 2026** and save it as `data/yellow_tripdata_2026-08.parquet`.
+
+### 4. Start Postgres
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml up -d
+```
+You should see that the docker-postgres is running. Postgres is published on port **5433**, not 5432.
+
+### 5. Create the staging table
+```powershell
+Get-Content sql\create_staging.sql | docker exec -i docker-postgres-1 psql -U <user> -d <db>
+```
+
+### 6. Load the data
+```powershell
+python scripts\load_data.py
+```
+It takes around 30 seconds to run and it will give you the results for POSTGRES_USER,POSTGRES_DB,host and port with the rows loaded it should reach 3336716.
+
+### 7. Verify
+```powershell
+docker exec -it docker-postgres-1 psql -U <user> -d <db> -c "SELECT COUNT(*) FROM staging_yellow_trips;"
+```
+Expected: `3336716`. Running the loader again keeps the count at 3,336,716, because the script truncates the table first.
