@@ -33,9 +33,7 @@ with psycopg.connect(
     with conn.cursor() as cur:
         cur.execute("TRUNCATE staging_yellow_trips")
 
-         for batch in pf.iter_batches(batch_size=100_000):
-
-
+        for batch in pf.iter_batches(batch_size=100_000):
             columns = [col.to_pylist() for col in batch.columns]
             with cur.copy("COPY staging_yellow_trips FROM STDIN") as copy:
                 for row in zip(*columns):
