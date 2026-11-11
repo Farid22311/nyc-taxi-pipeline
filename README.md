@@ -15,8 +15,8 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 
 ## Status
 
-Week 1: Postgres running via Docker Compose
-Week 1 is Done
+   - Week 1: Postgres running via Docker Compose, raw August 2026 file loaded into staging (done)
+   - Week 2: clean table designed and loaded with documented cleaning rules (done); next: analytical queries and the loader in a container
 
 ## How to run
 
@@ -51,6 +51,7 @@ From the [TLC Trip Record Data page](https://www.nyc.gov/site/tlc/about/tlc-trip
 ### 4. Start Postgres
 ```powershell
 docker compose --env-file .env -f docker/docker-compose.yml up -d
+docker ps
 ```
 You should see that the docker-postgres is running. Postgres is published on port **5433**, not 5432.
 
@@ -63,10 +64,20 @@ Get-Content sql\create_staging.sql | docker exec -i docker-postgres-1 psql -U <u
 ```powershell
 python scripts\load_data.py
 ```
-It takes around 30 seconds to run and it will give you the results for POSTGRES_USER,POSTGRES_DB,host and port with the rows loaded it should reach 3336716.
+It takes about 30 seconds and prints the connection settings and the number of rows loaded, which should reach 3,336,716.
 
 ### 7. Verify
 ```powershell
 docker exec -it docker-postgres-1 psql -U <user> -d <db> -c "SELECT COUNT(*) FROM staging_yellow_trips;"
 ```
 Expected: `3336716`. Running the loader again keeps the count at 3,336,716, because the script truncates the table first.
+
+### 8. Create and load the clean table
+Get-Content sql\create_clean.sql | docker exec -i docker-postgres-1 psql -U <user> -d <db>
+Get-Content sql\alter_clean.sql  | docker exec -i docker-postgres-1 psql -U <user> -d <db>
+Get-Content sql\load_clean.sql   | docker exec -i docker-postgres-1 psql -U <user> -d <db>
+
+### 9. Verify the clean table
+SELECT COUNT(*) FROM clean_yellow_trips;                                  -- 3,336,715
+SELECT is_reversal, COUNT(*) FROM clean_yellow_trips GROUP BY 1;          -- 14,510 true
+SELECT has_passenger_count, COUNT(*) FROM clean_yellow_trips GROUP BY 1;  -- 921,181 false
