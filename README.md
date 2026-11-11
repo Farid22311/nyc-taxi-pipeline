@@ -1,6 +1,6 @@
 # nyc-taxi-pipeline
 
-It’s an end-to-end data pipeline on NYC TLC Yellow Taxi trip data. Making this project to learn and demonstrate core data engineering tools.
+An end-to-end data pipeline on NYC TLC Yellow Taxi trip data (in progress), built to learn and demonstrate core data engineering tools.
 
 ## Data
 
@@ -15,8 +15,49 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 
 ## Status
 
-   - Week 1: Postgres running via Docker Compose, raw August 2026 file loaded into staging (done)
-   - Week 2: clean table designed and loaded with documented cleaning rules (done); next: analytical queries and the loader in a container
+- Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
+- Week 2 (in progress): clean table designed, cleaning rules documented and applied (3,336,715 rows); next: analytical queries and the loader in a container
+
+## Repo structure
+
+```
+docker/        docker-compose.yml for Postgres
+scripts/       load_data.py (Parquet -> staging table)
+sql/           create_staging, create_clean, alter_clean, load_clean
+sql/checks/    one-off queries I used to investigate the data and decide the cleaning rules
+data/          local Parquet files (not committed)
+```
+
+## Data model
+
+The data lands in two tables, so the raw file is never altered.
+
+- `staging_yellow_trips`: the file exactly as loaded. 21 columns, no constraints.
+- `clean_yellow_trips`: typed and constrained, with a surrogate `trip_id` and two flags: `has_passenger_count` and `is_reversal`.
+
+Money columns are `NUMERIC(10,2)` in the clean table, not `DOUBLE PRECISION` as in staging. Floating point cannot represent most decimal amounts exactly, so sums of fares would drift. Distance stays `DOUBLE PRECISION` because it is a measurement, not money.
+
+The clean load is idempotent. `load_clean.sql` truncates the table, restarts the identity and inserts in one transaction, so a rerun gives identical rows and identical `trip_id` values.
+
+## Cleaning decisions
+
+I checked the data before loading. All 3,336,716 rows fit the `NUMERIC(10,2)` range (largest value 5,530.74), and no column that is `NOT NULL` in the clean table contains a NULL. Result: 3,336,715 rows in the clean table.
+
+| Finding | Rows | Decision | Reason |
+|---|---|---|---|
+| No passenger count | 921,181 | Keep, flag `has_passenger_count` | A different population: average distance 8.93 vs 3.37 miles, average fare $25.14 vs $19.65. Dropping them would hide that; the flag lets each query include or exclude them. |
+| Negative amounts (reversals) | 14,510 | Keep, flag `is_reversal` | Negatives appear in almost every money column, and 72.8% of negative fares have payment type 4 or 3. The file does not show whether each reversal's original trip is present, so the flag lets each query choose. Rule: `fare_amount < 0 OR total_amount < 0`. |
+| Pickup in 2009 | 1 | Drop | A plausible trip with an impossible date. The true date cannot be recovered, so it cannot be placed in any hourly or zone aggregate. |
+| Pickup in July 2026 | 14 | Keep | Valid timestamps on plausible trips, reported in the next month's file. |
+| Pickup after dropoff | 3 | Keep | The true order cannot be recovered, but pickup time and fare are still correct for trips per hour and revenue per zone. |
+| Zero passengers | 7,478 | Keep | Ordinary trips, slightly smaller than average (2.51 vs 3.37 miles, $17.80 vs $19.66). Already identifiable by `passenger_count = 0`, so no extra flag. |
+
+A flag names a rule once, so queries don't each rewrite it. `is_reversal` is the clear case: it combines two columns and is easy to get wrong. `has_passenger_count` is the weaker case: `passenger_count IS NOT NULL` gives the same result, but the flag marks a whole block of rows with different behaviour (see the table above). Conditions that one existing column already shows, such as zero passengers, get no flag.
+
+## Open questions
+
+- `request_source` is filled for almost all rows without a passenger count (codes such as HV0003 and HV0005). I could not confirm which companies these codes are, or why these rows appear in a yellow-taxi file.
+- Whether each negative (reversal) row has a matching original positive trip in the file.
 
 ## How to run
 
@@ -73,11 +114,17 @@ docker exec -it docker-postgres-1 psql -U <user> -d <db> -c "SELECT COUNT(*) FRO
 Expected: `3336716`. Running the loader again keeps the count at 3,336,716, because the script truncates the table first.
 
 ### 8. Create and load the clean table
+```powershell
 Get-Content sql\create_clean.sql | docker exec -i docker-postgres-1 psql -U <user> -d <db>
 Get-Content sql\alter_clean.sql  | docker exec -i docker-postgres-1 psql -U <user> -d <db>
 Get-Content sql\load_clean.sql   | docker exec -i docker-postgres-1 psql -U <user> -d <db>
+```
+`load_clean.sql` can be rerun on its own: it truncates the table and restarts `trip_id` inside one transaction.
 
 ### 9. Verify the clean table
-SELECT COUNT(*) FROM clean_yellow_trips;                                  -- 3,336,715
-SELECT is_reversal, COUNT(*) FROM clean_yellow_trips GROUP BY 1;          -- 14,510 true
-SELECT has_passenger_count, COUNT(*) FROM clean_yellow_trips GROUP BY 1;  -- 921,181 false
+```powershell
+docker exec -it docker-postgres-1 psql -U <user> -d <db> -c "SELECT COUNT(*) FROM clean_yellow_trips;"
+docker exec -it docker-postgres-1 psql -U <user> -d <db> -c "SELECT is_reversal, COUNT(*) FROM clean_yellow_trips GROUP BY 1;"
+docker exec -it docker-postgres-1 psql -U <user> -d <db> -c "SELECT has_passenger_count, COUNT(*) FROM clean_yellow_trips GROUP BY 1;"
+```
+Expected: 3,336,715 rows in total, 14,510 with `is_reversal` true, 921,181 with `has_passenger_count` false.
