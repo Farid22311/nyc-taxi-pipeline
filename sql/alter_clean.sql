@@ -1,0 +1,2 @@
+   ALTER TABLE clean_yellow_trips
+   ADD COLUMN IF NOT EXISTS is_reversal BOOLEAN NOT NULL DEFAULT FALSE;
