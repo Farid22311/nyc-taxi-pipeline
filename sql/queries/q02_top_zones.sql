@@ -5,13 +5,14 @@
 WITH zone_revenue AS (
     SELECT
         pulocationid,
-        COUNT(*)          AS trips,
-        SUM(total_amount) AS revenue
+        COUNT(*)                                   AS trips,
+        SUM(total_amount)                          AS revenue,
+        ROUND(SUM(total_amount) / COUNT(*), 2)     AS revenue_per_trip
     FROM clean_yellow_trips
     WHERE NOT is_reversal
     GROUP BY pulocationid
 )
-SELECT pulocationid, trips, revenue
+SELECT pulocationid, trips, revenue, revenue_per_trip
 FROM zone_revenue
 ORDER BY revenue DESC
 LIMIT 10;
