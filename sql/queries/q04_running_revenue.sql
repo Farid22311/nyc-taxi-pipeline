@@ -11,9 +11,7 @@ WITH daily AS (
 )
 SELECT
     pickup_date,
-    revenue
-    -- add: a running total of revenue, ordered by date, named running_revenue
-    -- pattern from Q3: FUNCTION(...) OVER (ORDER BY ...) AS name
-    -- the function is SUM(revenue). Mind the comma after revenue.
+    revenue,
+    SUM(revenue) OVER (ORDER BY pickup_date) AS running_revenue
 FROM daily
 ORDER BY pickup_date;

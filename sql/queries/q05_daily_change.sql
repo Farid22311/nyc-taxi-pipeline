@@ -12,9 +12,8 @@ WITH daily AS (
 with_prev AS (
     SELECT
         pickup_date,
-        revenue
-        -- add: the previous day's revenue, named prev_revenue
-        -- the function is LAG(revenue) OVER (ORDER BY ...)
+        revenue,
+        LAG(revenue) OVER (ORDER BY pickup_date) AS prev_revenue
     FROM daily
 )
 SELECT
