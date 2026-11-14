@@ -26,5 +26,16 @@ services:
       - postgres
     profiles: ["loader"]
 
+  spark:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.spark
+    working_dir: /app
+    volumes:
+      - ../data:/app/data:ro
+      - ../spark_jobs:/app/spark_jobs
+      - ../output:/app/output
+    profiles: ["spark"]
+
 volumes:
   postgres_data:
