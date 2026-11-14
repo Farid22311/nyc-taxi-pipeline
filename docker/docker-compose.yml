@@ -11,5 +11,20 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  loader:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.loader
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    volumes:
+      - ../data:/app/data:ro
+    depends_on:
+      - postgres
+    profiles: ["loader"]
+
 volumes:
   postgres_data:

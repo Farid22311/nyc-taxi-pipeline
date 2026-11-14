@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-HOST = "localhost"
-PORT = 5433
+HOST = os.getenv("POSTGRES_HOST", "localhost")
+PORT = int(os.getenv("POSTGRES_PORT", "5433"))
 
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
