@@ -17,6 +17,7 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
+- Week 3 (in progress): Spark container reads the Parquet file (3,336,716 rows, same as Postgres)
 
 ## Repo structure
 
