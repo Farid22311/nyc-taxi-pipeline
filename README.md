@@ -17,16 +17,21 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
-- Week 3 (in progress): Spark cleaning job matches the Postgres clean table; aggregation job writes output partitioned by pickup date
+- Week 3 (in progress): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark compares Spark with pandas.
+
 ## Repo structure
 
 ```
-docker/          docker-compose.yml (Postgres, loader), Dockerfile.loader
-scripts/         load_data.py (Parquet -> staging table)
-sql/             create_staging, create_clean, alter_clean, load_clean
-sql/checks/      one-off queries I used to investigate the data and decide the cleaning rules
-sql/queries/     analytical queries q01 to q06
-data/            local Parquet files (not committed)
+docker/              docker-compose.yml (Postgres, loader, Spark), Dockerfile.loader, Dockerfile.spark
+scripts/             load_data.py (Parquet -> staging table)
+spark_jobs/          PySpark jobs: 00_hello, 01_clean, 02_aggregate, 03_benchmark
+sql/                 create_staging, create_clean, alter_clean, load_clean
+sql/checks/          one-off queries I used to investigate the data and decide the cleaning rules
+sql/queries/         analytical queries q01 to q06
+data/                local Parquet files (not committed)
+output/              Spark output (not committed)
+requirements.txt     Python dependencies for the loader
+requirements-spark.txt  Python dependencies for the Spark image
 ```
 
 ## Data model
@@ -67,9 +72,30 @@ All queries run on `clean_yellow_trips` and exclude reversals (`WHERE NOT is_rev
 | q04 | Running total of daily revenue (window function) | Ends at $100,779,468.23, which matches the non-reversal revenue total. |
 | q05 | Day-over-day revenue change (`LAG`) | Jul 31 is a partial day, so the Aug 1 change is meaningless. Aug 20 is a spike ($4,327,427.23, +$1,249,617.47). Mondays are the lowest days. |
 | q06 | Aug 19 to 21: trips, revenue, revenue per trip | Trips rose 30% on Aug 20 (104,685 to 136,144) and fell back on Aug 21 (100,481). Revenue per trip moved from $29.40 to $31.79 and stayed at $31.29, so the spike is mainly more trips. |
--- Conclusion: Aug 20 is mainly a spike in trips (+30%, then back below the Aug 19 level on Aug 21).
--- Revenue per trip rose 8% and did not revert (29.40 -> 31.79 -> 31.29), so that part is a step up.
--- Trips explain most of the +1,249,617.47 revenue jump.
+
+## Spark jobs
+
+The same cleaning rules as the Postgres clean table, applied in PySpark. Spark runs in its own container, so no Java is needed on the host.
+
+| Job | What it does | Check |
+|---|---|---|
+| `00_hello.py` | Reads the August file and prints schema and row count | 3,336,716 rows, same as staging |
+| `01_clean.py` | Filters pickups before 2020-01-01, adds `has_passenger_count` and `is_reversal`, writes Parquet | 3,336,715 rows, 14,510 reversals, 921,181 without passenger count, revenue $100,779,468.23 |
+| `02_aggregate.py` | Trips per hour and revenue per zone (reversals excluded, money as `DECIMAL`); writes output partitioned by `pickup_date` | Same numbers as q01 and q02; reading Aug 19 to 21 touches only 3 of 32 partition folders (`PartitionFilters` in `explain()`) |
+| `03_benchmark.py` | Times Spark against pandas | See below |
+
+I partition by pickup date, not by timestamp (millions of tiny folders) and not by passenger count (921,181 nulls, one folder holds most trips, and no query filters on it).
+
+## Spark vs pandas
+
+Both tools compute trips and revenue per pickup zone, reversals excluded, over 5 monthly files (May to September): 18,597,780 trips, 3 of 24 columns read, same container, 3 runs each. Both return identical results (18,597,780 trips, $574,906,761.04).
+
+| Tool | Run 1 | Run 2 | Run 3 | Median |
+|---|---|---|---|---|
+| pandas | 2.6s | 12.0s | 2.3s | 2.6s |
+| Spark | 11.5s | 1.0s | 1.0s | 1.0s |
+
+Warm, Spark was about 2.5x faster (1.0s against 2.6s median). On the first run pandas was about 4x faster (2.6s against 11.5s), because Spark pays for JVM start-up and file listing once. pandas run 2 (12.0s) is an outlier I could not explain. This test does not show where pandas breaks: the data fits in memory, so it is not a test of scale.
 
 ## Open questions
 
@@ -123,14 +149,14 @@ Get-Content sql\create_staging.sql | docker exec -i docker-postgres-1 psql -U <u
 ```powershell
 python scripts\load_data.py
 ```
+It takes about 30 seconds and prints the connection settings and the number of rows loaded, which should reach 3,336,716.
+
 ### 6b. Load the data (in a container)
 Alternative to step 6. Postgres must be running and the staging table must exist.
 ```powershell
 docker compose --env-file .env -f docker/docker-compose.yml run --rm loader
 ```
 The container reaches Postgres by the service name `postgres` on port 5432 (5433 is only the host port). Always pass `--env-file .env`, otherwise Compose recreates Postgres with blank credentials.
-
-It takes about 30 seconds and prints the connection settings and the number of rows loaded, which should reach 3,336,716.
 
 ### 7. Verify
 ```powershell
@@ -159,3 +185,26 @@ Expected: 3,336,715 rows in total, 14,510 with `is_reversal` true, 921,181 with 
 Get-Content sql\queries\q01_<name>.sql | docker exec -i docker-postgres-1 psql -U <user> -d <db>
 ```
 Replace the file name for each query in `sql/queries/`.
+
+### 11. Build the Spark image
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml build spark
+```
+
+### 12. Clean with Spark
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml run --rm spark python spark_jobs/01_clean.py
+```
+Expected: 3,336,715 rows, 14,510 reversals, 921,181 without passenger count.
+
+### 13. Aggregate and partition
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml run --rm spark python spark_jobs/02_aggregate.py
+```
+Writes `output/trips_by_date/` with one folder per pickup date.
+
+### 14. Benchmark
+Put several monthly files in `data/` (`yellow_tripdata_2026-0X.parquet`), then:
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml run --rm spark python spark_jobs/03_benchmark.py
+```
