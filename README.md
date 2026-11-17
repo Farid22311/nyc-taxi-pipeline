@@ -83,6 +83,7 @@ The same cleaning rules as the Postgres clean table, applied in PySpark. Spark r
 | `01_clean.py` | Filters pickups before 2020-01-01, adds `has_passenger_count` and `is_reversal`, writes Parquet | 3,336,715 rows, 14,510 reversals, 921,181 without passenger count, revenue $100,779,468.23 |
 | `02_aggregate.py` | Trips per hour and revenue per zone (reversals excluded, money as `DECIMAL`); writes output partitioned by `pickup_date` | Same numbers as q01 and q02; reading Aug 19 to 21 touches only 3 of 32 partition folders (`PartitionFilters` in `explain()`) |
 | `03_benchmark.py` | Times Spark against pandas | See below |
+| `04_memory_test.py` | Runs one tool on all 24 columns, for the memory-capped comparison | pandas killed at 4 GB, Spark finishes |
 
 I partition by pickup date, not by timestamp (millions of tiny folders) and not by passenger count (921,181 nulls, one folder holds most trips, and no query filters on it).
 
@@ -96,6 +97,18 @@ Both tools compute trips and revenue per pickup zone, reversals excluded, over 5
 | Spark | 11.5s | 1.0s | 1.0s | 1.0s |
 
 Warm, Spark was about 2.5x faster (1.0s against 2.6s median). On the first run pandas was about 4x faster (2.6s against 11.5s), because Spark pays for JVM start-up and file listing once. pandas run 2 (12.0s) is an outlier I could not explain. This test does not show where pandas breaks: the data fits in memory, so it is not a test of scale.
+
+### Memory test (4 GB cap)
+
+Same 5 files, but all 24 columns, one tool per run, inside a container capped at 4 GB (`spark-4g`, swap disabled).
+
+| Run | Result |
+|---|---|
+| pandas, 4 GB cap | Killed (exit 137, out of memory) |
+| pandas, no cap | 28.7s, peak 6,618 MB (the loaded frame alone is 2,815 MB) |
+| Spark, 4 GB cap | 15.7s, same results (18,597,780 trips, $574,906,761.04) |
+
+Spark finished under the cap because it reads only the columns the query uses: the plan's `ReadSchema` has 3 of 24 columns (column pruning). pandas loaded all 24 only because I did not pass `columns=`, and on 3 columns it ran in about 2 seconds in the Day 16 benchmark. So the lesson is that Spark prunes columns for you and pandas needs them selected explicitly. The extra pandas memory is likely copies during `concat` and the filter, which I did not measure.
 
 ## Open questions
 
@@ -208,3 +221,9 @@ Put several monthly files in `data/` (`yellow_tripdata_2026-0X.parquet`), then:
 ```powershell
 docker compose --env-file .env -f docker/docker-compose.yml run --rm spark python spark_jobs/03_benchmark.py
 ```
+### 15. Memory test
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml run --rm spark-4g python spark_jobs/04_memory_test.py pandas
+docker compose --env-file .env -f docker/docker-compose.yml run --rm spark-4g python spark_jobs/04_memory_test.py spark
+```
+Exit code 137 for pandas means the container ran out of memory, which is the expected result.

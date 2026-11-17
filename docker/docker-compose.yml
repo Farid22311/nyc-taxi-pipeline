@@ -37,5 +37,11 @@ services:
       - ../output:/app/output
     profiles: ["spark"]
 
+  spark-4g:
+    extends:
+      service: spark
+    mem_limit: 4g
+    memswap_limit: 4g
+    profiles: ["spark"]
 volumes:
   postgres_data:
