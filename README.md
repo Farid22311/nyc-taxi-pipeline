@@ -18,20 +18,21 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
 - Week 3 (in progress): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark compares Spark with pandas.
-- Airflow (in progress): Airflow 3.3.0 runs in Docker Compose (`airflow/`), first DAG `hello_dag` with three tasks
+- Airflow (in progress): Airflow 3.3.0 runs in Docker Compose (`airflow/`). `taxi_download` downloads and validates one monthly Parquet file, with the month as a parameter.
 
 ## Repo structure
 
 ```
 docker/              docker-compose.yml (Postgres, loader, Spark), Dockerfile.loader, Dockerfile.spark
 airflow/             Airflow's own docker-compose.yaml (official file, example DAGs off)
-airflow/dags/        DAGs: hello_dag
+airflow/dags/        DAGs: hello_dag, taxi_download
 scripts/             load_data.py (Parquet -> staging table)
 spark_jobs/          PySpark jobs: 00_hello, 01_clean, 02_aggregate, 03_benchmark, 04_memory_test
 sql/                 create_staging, create_clean, alter_clean, load_clean
 sql/checks/          one-off queries I used to investigate the data and decide the cleaning rules
 sql/queries/         analytical queries q01 to q06
 data/                local Parquet files (not committed)
+data/downloads/      files downloaded by Airflow (not committed)
 output/              Spark output (not committed)
 requirements.txt     Python dependencies for the loader
 requirements-spark.txt  Python dependencies for the Spark image
@@ -246,5 +247,18 @@ docker compose exec airflow-scheduler airflow dags list
 Open http://localhost:8080 and log in as `airflow` / `airflow`. New DAGs start paused: switch `hello_dag` on, then trigger it. Expected: three green tasks (`start`, `hello`, `end`).
 
 If a DAG file you add does not show up, the dag-processor rescans the folder only every few minutes. Run `docker compose restart airflow-dag-processor` to force it.
+
+The compose file mounts two folders into the Airflow containers: `airflow/dags` and `../data` (the repo's `data/` folder). Both lines go under `volumes:`:
+```
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/../data:/opt/airflow/data
+```
+Check both mounts from inside a container (`dags` must show the DAG files and `data` the Parquet files):
+```powershell
+docker compose exec airflow-scheduler ls /opt/airflow/dags
+docker compose exec airflow-scheduler ls /opt/airflow/data
+```
+
+Trigger `taxi_download` in the UI and enter a `month` such as `2026-08`. The file lands in `data/downloads/`, not in `data/`, so the Spark and benchmark file patterns still match only the original files. Running the same month twice skips the download (the file already exists), and a download is written to a `.part` file and renamed only when complete.
 
 Stop with `docker compose down`. Do not add `--volumes` unless you want to delete Airflow's database and run history.
