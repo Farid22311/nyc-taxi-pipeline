@@ -1,7 +1,7 @@
 import os
 import shutil
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
@@ -52,6 +52,7 @@ with DAG(
     schedule=None,
     catchup=False,
     params={"month": "2026-08"},
+    default_args={"retries": 2, "retry_delay": timedelta(seconds=20)},
 ) as dag:
     download = PythonOperator(
         task_id="download_month",
