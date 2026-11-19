@@ -18,13 +18,16 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
 - Week 3 (in progress): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark compares Spark with pandas.
+- Airflow (in progress): Airflow 3.3.0 runs in Docker Compose (`airflow/`), first DAG `hello_dag` with three tasks
 
 ## Repo structure
 
 ```
 docker/              docker-compose.yml (Postgres, loader, Spark), Dockerfile.loader, Dockerfile.spark
+airflow/             Airflow's own docker-compose.yaml (official file, example DAGs off)
+airflow/dags/        DAGs: hello_dag
 scripts/             load_data.py (Parquet -> staging table)
-spark_jobs/          PySpark jobs: 00_hello, 01_clean, 02_aggregate, 03_benchmark
+spark_jobs/          PySpark jobs: 00_hello, 01_clean, 02_aggregate, 03_benchmark, 04_memory_test
 sql/                 create_staging, create_clean, alter_clean, load_clean
 sql/checks/          one-off queries I used to investigate the data and decide the cleaning rules
 sql/queries/         analytical queries q01 to q06
@@ -227,3 +230,21 @@ docker compose --env-file .env -f docker/docker-compose.yml run --rm spark-4g py
 docker compose --env-file .env -f docker/docker-compose.yml run --rm spark-4g python spark_jobs/04_memory_test.py spark
 ```
 Exit code 137 for pandas means the container ran out of memory, which is the expected result.
+
+### 16. Airflow
+Airflow runs from its own folder and its own Compose project, separate from Postgres and Spark. The `airflow/docker-compose.yaml` is the official file for Airflow 3.3.0, with `AIRFLOW__CORE__LOAD_EXAMPLES` set to `'false'`.
+
+Run everything from inside `airflow/`, so that `dags/` sits next to the compose file (a nested `airflow/airflow/dags` folder is not mounted and the DAG is never found):
+```powershell
+cd airflow
+mkdir dags, logs, plugins, config
+Set-Content -Path .env -Value "AIRFLOW_UID=50000" -Encoding ascii
+docker compose up airflow-init
+docker compose up -d
+docker compose exec airflow-scheduler airflow dags list
+```
+Open http://localhost:8080 and log in as `airflow` / `airflow`. New DAGs start paused: switch `hello_dag` on, then trigger it. Expected: three green tasks (`start`, `hello`, `end`).
+
+If a DAG file you add does not show up, the dag-processor rescans the folder only every few minutes. Run `docker compose restart airflow-dag-processor` to force it.
+
+Stop with `docker compose down`. Do not add `--volumes` unless you want to delete Airflow's database and run history.
