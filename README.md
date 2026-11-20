@@ -18,13 +18,14 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
 - Week 3 (in progress): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark compares Spark with pandas.
-- Airflow (in progress): Airflow 3.3.0 runs in Docker Compose (`airflow/`). `taxi_download` downloads and validates one monthly Parquet file, with the month as a parameter and retries (`retries=2`, `retry_delay=20s`). `retry_demo` shows a task failing once and succeeding on the retry.
+- Airflow (in progress): Airflow 3.3.0 runs in Docker Compose (`airflow/`). `taxi_download` downloads and validates one monthly Parquet file, with the month as a parameter and retries (`retries=2`, `retry_delay=20s`). `retry_demo` shows a task failing once and succeeding on the retry. Airflow runs on a custom image (pandas, pyarrow, psycopg) and reaches the project Postgres, ready for the transform and load steps.
 
 ## Repo structure
 
 ```
 docker/              docker-compose.yml (Postgres, loader, Spark), Dockerfile.loader, Dockerfile.spark
 airflow/             Airflow's own docker-compose.yaml (official file, example DAGs off)
+airflow/Dockerfile   custom image: pandas, pyarrow, psycopg (versions in airflow/requirements.txt)
 airflow/dags/        DAGs: hello_dag, taxi_download, retry_demo
 scripts/             load_data.py (Parquet -> staging table)
 spark_jobs/          PySpark jobs: 00_hello, 01_clean, 02_aggregate, 03_benchmark, 04_memory_test
@@ -225,6 +226,7 @@ Put several monthly files in `data/` (`yellow_tripdata_2026-0X.parquet`), then:
 ```powershell
 docker compose --env-file .env -f docker/docker-compose.yml run --rm spark python spark_jobs/03_benchmark.py
 ```
+
 ### 15. Memory test
 ```powershell
 docker compose --env-file .env -f docker/docker-compose.yml run --rm spark-4g python spark_jobs/04_memory_test.py pandas
@@ -240,10 +242,13 @@ Run everything from inside `airflow/`, so that `dags/` sits next to the compose 
 cd airflow
 mkdir dags, logs, plugins, config
 Set-Content -Path .env -Value "AIRFLOW_UID=50000" -Encoding ascii
+Get-Content ..\.env | Where-Object { $_ -match '^POSTGRES_(USER|PASSWORD|DB)=' } | ForEach-Object { $_ -replace '^POSTGRES_','PROJECT_PG_' } | Add-Content .env
+docker compose build
 docker compose up airflow-init
 docker compose up -d
 docker compose exec airflow-scheduler airflow dags list
 ```
+`docker compose build` builds the custom image from `airflow/Dockerfile` before the first `up`, and again whenever `airflow/requirements.txt` changes. Run these commands in a terminal; never paste them into a file (Compose reads `.env` as variables and fails on anything else).
 Open http://localhost:8080 and log in as `airflow` / `airflow`. New DAGs start paused: switch `hello_dag` on, then trigger it. Expected: three green tasks (`start`, `hello`, `end`).
 
 If a DAG file you add does not show up, the dag-processor rescans the folder only every few minutes. Run `docker compose restart airflow-dag-processor` to force it.
@@ -260,5 +265,10 @@ docker compose exec airflow-scheduler ls /opt/airflow/data
 ```
 
 Trigger `taxi_download` in the UI and enter a `month` such as `2026-08`. The file lands in `data/downloads/`, not in `data/`, so the Spark and benchmark file patterns still match only the original files. Running the same month twice skips the download (the file already exists), and a download is written to a `.part` file and renamed only when complete.
+
+The Airflow containers reach the project Postgres (the one from step 4, which must be running) through `host.docker.internal:5433`, the host port, with credentials from `airflow/.env` as `PROJECT_PG_USER`, `PROJECT_PG_PASSWORD` and `PROJECT_PG_DB`. The service name `postgres` cannot be used here: inside the Airflow Compose project it is Airflow's own metadata database. The compose file passes these values to the containers with the `PROJECT_PG_*` lines under `environment:` and uses `image: airflow-custom:3.3.0` with `build: .`. Check the route from the worker (expected: `(3336715,)`):
+```powershell
+docker compose exec airflow-worker python -c "import os, psycopg; c = psycopg.connect(host=os.environ['PROJECT_PG_HOST'], port=os.environ['PROJECT_PG_PORT'], dbname=os.environ['PROJECT_PG_DB'], user=os.environ['PROJECT_PG_USER'], password=os.environ['PROJECT_PG_PASSWORD']); print(c.execute('SELECT COUNT(*) FROM clean_yellow_trips').fetchone())"
+```
 
 Stop with `docker compose down`. Do not add `--volumes` unless you want to delete Airflow's database and run history.
