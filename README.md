@@ -17,7 +17,7 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
-- Week 3 (in progress): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark compares Spark with pandas.
+- Week 3 (done): PySpark in a container. The cleaning job matches the Postgres clean table (3,336,715 rows), the aggregation job writes output partitioned by pickup date, and a benchmark and a 4 GB memory test compare Spark with pandas.
 - Airflow (in progress): Airflow 3.3.0 runs in Docker Compose (`airflow/`). `taxi_download` downloads and validates one monthly Parquet file, with the month as a parameter and retries (`retries=2`, `retry_delay=20s`). `retry_demo` shows a task failing once and succeeding on the retry. Airflow runs on a custom image (pandas, pyarrow, psycopg) and reaches the project Postgres, ready for the transform and load steps.
 
 ## Repo structure
