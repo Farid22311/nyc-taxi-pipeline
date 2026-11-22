@@ -1,5 +1,5 @@
 -- Q3: top 3 pickup zones by revenue within each payment type
--- Reversals: excluded with WHERE NOT is_reversal, the same rule as Q1 and Q2.
+-- Reversals: excluded with WHERE NOT is_reversal AND source_month = '2026-08', the same rule as Q1 and Q2.
 -- Why two CTEs: a window function can't be used in WHERE, so the rank is computed in one step and filtered in the next.
 
 WITH zone_payment AS (
@@ -9,7 +9,7 @@ WITH zone_payment AS (
         COUNT(*)          AS trips,
         SUM(total_amount) AS revenue
     FROM clean_yellow_trips
-    WHERE NOT is_reversal
+    WHERE NOT is_reversal AND source_month = '2026-08'
     GROUP BY payment_type, pulocationid
 ),
 ranked AS (

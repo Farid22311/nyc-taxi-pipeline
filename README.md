@@ -18,7 +18,7 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
 - Week 3 (done): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark and a 4 GB memory test compare Spark with pandas.
-- Airflow (in progress): Airflow 3.3.0 on a custom image (pandas, pyarrow, psycopg) in Docker Compose (`airflow/`). The `taxi_pipeline` DAG downloads, validates, transforms (pandas) and loads (delete then insert by `source_month`) one month at a time, with retries (`retries=2`, `retry_delay=20s`). `retry_demo` shows a task failing once and succeeding on the retry.
+- Airflow (in progress): Airflow 3.3.0 on a custom image (pandas, pyarrow, psycopg) in Docker Compose (`airflow/`). The `taxi_pipeline` DAG downloads, validates, transforms (pandas) and loads (delete then insert by `source_month`) one month at a time, with retries (`retries=2`, `retry_delay=20s`). It is scheduled monthly (`@monthly`) and was backfilled for 2026-05 to 2026-08; the load maps columns by name, so a month whose file lacks a column still loads. `retry_demo` shows a task failing once and succeeding on the retry.
 
 ## Repo structure
 
@@ -70,7 +70,7 @@ A flag names a rule once, so queries don't each rewrite it. `is_reversal` is the
 
 ## Analytical queries
 
-All queries run on `clean_yellow_trips` and exclude reversals (`WHERE NOT is_reversal`): a reversal is a refund or voided charge, not a trip. Revenue is therefore gross, about 0.43% above net if the original charges are in the file. The result tables below are for the August 2026 file.
+All queries run on `clean_yellow_trips` and exclude reversals (`WHERE NOT is_reversal`): a reversal is a refund or voided charge, not a trip. Revenue is therefore gross, about 0.43% above net if the original charges are in the file. Because the table now holds several months, every query also filters on `source_month = '2026-08'`, so the results below are for the August 2026 file.
 
 | Query | Question | Finding |
 |---|---|---|
@@ -123,6 +123,7 @@ Spark finished under the cap because it reads only the columns the query uses: t
 - `request_source` is filled for almost all rows without a passenger count (codes such as HV0003 and HV0005). I could not confirm which companies these codes are, or why these rows appear in a yellow-taxi file.
 - Whether each negative (reversal) row has a matching original positive trip in the file.
 - Zone 79: null-passenger rows are 41.8% of its trips (27.3% elsewhere) and explain its high average miles. They do not explain its low fares: those trips earn $1.82 per mile against $3.71 for null-passenger trips elsewhere. Untested why.
+- The May 2026 file has no `request_source` column; June to August have it. I found this when the May load failed with `missing data for column` (the first version of the load assumed a fixed column order, and the three retries failed the same way). The load now reads the column names from each file, so a missing column stays `NULL` and an unknown column fails the load. I did not check when the column was added or whether other months differ.
 
 ## How to run
 
@@ -272,6 +273,18 @@ Trigger `taxi_pipeline` in the UI and enter a `month` such as `2026-08`. The fou
 ```powershell
 docker exec -it docker-postgres-1 psql -U <user> -d <db> -c "SELECT source_month, COUNT(*), COUNT(*) FILTER (WHERE is_reversal) AS reversals FROM clean_yellow_trips GROUP BY 1 ORDER BY 1;"
 ```
+
+#### Schedule and backfill
+`taxi_pipeline` runs monthly (`schedule="@monthly"`, `catchup=False`). Each run processes the month of its data interval, so the run for the interval that starts on 1 August loads `2026-08`. The `month` parameter is only an override for manual runs; leave it empty for scheduled and backfilled runs. A manual run needs the month typed in.
+
+Past months are loaded with a backfill, one month at a time (`--max-active-runs 1`):
+```powershell
+docker compose exec airflow-scheduler airflow backfill create --dag-id taxi_pipeline --from-date 2026-05-01 --to-date 2026-08-01 --dry-run
+docker compose exec airflow-scheduler airflow backfill create --dag-id taxi_pipeline --from-date 2026-05-01 --to-date 2026-08-01 --reprocess-behavior none --max-active-runs 1
+```
+`--dry-run` lists the dates without creating runs. `--reprocess-behavior none` skips any date that already has a run, `failed` re-runs only failed runs, and `completed` re-runs everything (use it after changing the transform rules). Running the same backfill twice creates no new runs, and a re-run month gives the same rows, because the load deletes the month and inserts it in one transaction.
+
+The scheduler also creates a run for the latest finished month. TLC publishes a month about two months late, so that run can fail with a 404; a sensor that waits for the file is the planned fix.
 
 The Airflow containers reach the project Postgres (the one from step 4, which must be running) through `host.docker.internal:5433`, the host port, with credentials from `airflow/.env` as `PROJECT_PG_USER`, `PROJECT_PG_PASSWORD` and `PROJECT_PG_DB`. The service name `postgres` cannot be used here: inside the Airflow Compose project it is Airflow's own metadata database. The compose file passes these values to the containers with the `PROJECT_PG_*` lines under `environment:` and uses `image: airflow-custom:3.3.0` with `build: .`. Check the route from the worker (expected: `(3336715,)`):
 ```powershell

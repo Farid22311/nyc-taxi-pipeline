@@ -72,6 +72,7 @@ def transform_month(month):
 def load_month(month):
     import psycopg
     import pyarrow.parquet as pq
+    from psycopg import sql
 
     pf = pq.ParquetFile(clean_path(month))
     with psycopg.connect(
@@ -87,9 +88,13 @@ def load_month(month):
                 "ALTER TABLE tmp_month ADD COLUMN has_passenger_count BOOLEAN, "
                 "ADD COLUMN is_reversal BOOLEAN"
             )
+            names = [n.lower() for n in pf.schema_arrow.names]
+            copy_sql = sql.SQL("COPY tmp_month ({}) FROM STDIN").format(
+                sql.SQL(", ").join(sql.Identifier(n) for n in names)
+            )
             for batch in pf.iter_batches(batch_size=100_000):
                 columns = [col.to_pylist() for col in batch.columns]
-                with cur.copy("COPY tmp_month FROM STDIN") as copy:
+                with cur.copy(copy_sql) as copy:
                     for row in zip(*columns):
                         copy.write_row(row)
 
@@ -126,14 +131,14 @@ def load_month(month):
 
 with DAG(
     dag_id="taxi_pipeline",
-    start_date=datetime(2026, 11, 1),
-    schedule=None,
+    start_date=datetime(2026, 5, 1),
+    schedule="@monthly",
     catchup=False,
     max_active_runs=1,
-    params={"month": "2026-08"},
+    params={"month": ""},
     default_args={"retries": 2, "retry_delay": timedelta(seconds=20)},
 ) as dag:
-    month_arg = {"month": "{{ params.month }}"}
+    month_arg = {"month": "{{ params.month or data_interval_start.strftime('%Y-%m') }}"}
     download = PythonOperator(task_id="download_month", python_callable=download_month, op_kwargs=month_arg)
     validate = PythonOperator(task_id="validate_file", python_callable=validate_file, op_kwargs=month_arg)
     transform = PythonOperator(task_id="transform_month", python_callable=transform_month, op_kwargs=month_arg)

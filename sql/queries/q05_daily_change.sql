@@ -1,12 +1,12 @@
 -- Q5: daily revenue and change from the previous day
--- Reversals: excluded with WHERE NOT is_reversal.
+-- Reversals: excluded with WHERE NOT is_reversal AND source_month = '2026-08'.
 
 WITH daily AS (
     SELECT
         tpep_pickup_datetime::DATE AS pickup_date,
         SUM(total_amount)          AS revenue
     FROM clean_yellow_trips
-    WHERE NOT is_reversal
+    WHERE NOT is_reversal AND source_month = '2026-08'
     GROUP BY 1
 ),
 with_prev AS (
