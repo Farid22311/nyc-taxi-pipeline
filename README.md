@@ -17,8 +17,8 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
-- Week 3 (done): PySpark in a container. The cleaning job matches the Postgres clean table (3,336,715 rows), the aggregation job writes output partitioned by pickup date, and a benchmark and a 4 GB memory test compare Spark with pandas.
-- Airflow (in progress): Airflow 3.3.0 runs in Docker Compose (`airflow/`). `taxi_download` downloads and validates one monthly Parquet file, with the month as a parameter and retries (`retries=2`, `retry_delay=20s`). `retry_demo` shows a task failing once and succeeding on the retry. Airflow runs on a custom image (pandas, pyarrow, psycopg) and reaches the project Postgres, ready for the transform and load steps.
+- Week 3 (done): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark and a 4 GB memory test compare Spark with pandas.
+- Airflow (in progress): Airflow 3.3.0 on a custom image (pandas, pyarrow, psycopg) in Docker Compose (`airflow/`). The `taxi_pipeline` DAG downloads, validates, transforms (pandas) and loads (delete then insert by `source_month`) one month at a time, with retries (`retries=2`, `retry_delay=20s`). `retry_demo` shows a task failing once and succeeding on the retry.
 
 ## Repo structure
 
@@ -26,14 +26,15 @@ NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are
 docker/              docker-compose.yml (Postgres, loader, Spark), Dockerfile.loader, Dockerfile.spark
 airflow/             Airflow's own docker-compose.yaml (official file, example DAGs off)
 airflow/Dockerfile   custom image: pandas, pyarrow, psycopg (versions in airflow/requirements.txt)
-airflow/dags/        DAGs: hello_dag, taxi_download, retry_demo
+airflow/dags/        DAGs: hello_dag, taxi_pipeline, retry_demo
 scripts/             load_data.py (Parquet -> staging table)
 spark_jobs/          PySpark jobs: 00_hello, 01_clean, 02_aggregate, 03_benchmark, 04_memory_test
-sql/                 create_staging, create_clean, alter_clean, load_clean
+sql/                 create_staging, create_clean, alter_clean, alter_clean_source_month, load_clean
 sql/checks/          one-off queries I used to investigate the data and decide the cleaning rules
 sql/queries/         analytical queries q01 to q06
 data/                local Parquet files (not committed)
 data/downloads/      files downloaded by Airflow (not committed)
+data/clean/          cleaned files written by the Airflow DAG (not committed)
 output/              Spark output (not committed)
 requirements.txt     Python dependencies for the loader
 requirements-spark.txt  Python dependencies for the Spark image
@@ -49,6 +50,8 @@ The data lands in two tables, so the raw file is never altered.
 Money columns are `NUMERIC(10,2)` in the clean table, not `DOUBLE PRECISION` as in staging. Floating point cannot represent most decimal amounts exactly, so sums of fares would drift. Distance stays `DOUBLE PRECISION` because it is a measurement, not money.
 
 The clean load is idempotent. `load_clean.sql` truncates the table, restarts the identity and inserts in one transaction, so a rerun gives identical rows and identical `trip_id` values.
+
+The clean table has a `source_month` column (the month of the file a row came from, for example `2026-08`). The Airflow DAG loads one month at a time: it deletes that month's rows and inserts the new ones in one transaction, so rerunning a month gives the same rows. The `trip_id` values of a reloaded month change, because the identity keeps counting. Rows are keyed by file month, not pickup month, so the 14 July pickups inside the August file stay with August and a rerun cannot duplicate them.
 
 ## Cleaning decisions
 
@@ -186,6 +189,7 @@ Expected: `3336716`. Running the loader again keeps the count at 3,336,716, beca
 ```powershell
 Get-Content sql\create_clean.sql | docker exec -i docker-postgres-1 psql -U <user> -d <db>
 Get-Content sql\alter_clean.sql  | docker exec -i docker-postgres-1 psql -U <user> -d <db>
+Get-Content sql\alter_clean_source_month.sql | docker exec -i docker-postgres-1 psql -U <user> -d <db>
 Get-Content sql\load_clean.sql   | docker exec -i docker-postgres-1 psql -U <user> -d <db>
 ```
 `load_clean.sql` can be rerun on its own: it truncates the table and restarts `trip_id` inside one transaction.
@@ -264,7 +268,10 @@ docker compose exec airflow-scheduler ls /opt/airflow/dags
 docker compose exec airflow-scheduler ls /opt/airflow/data
 ```
 
-Trigger `taxi_download` in the UI and enter a `month` such as `2026-08`. The file lands in `data/downloads/`, not in `data/`, so the Spark and benchmark file patterns still match only the original files. Running the same month twice skips the download (the file already exists), and a download is written to a `.part` file and renamed only when complete.
+Trigger `taxi_pipeline` in the UI and enter a `month` such as `2026-08`. The four tasks run in order: `download_month`, `validate_file`, `transform_month`, `load_month`. The downloaded file lands in `data/downloads/` and the cleaned file in `data/clean/`, not in `data/`, so the Spark and benchmark file patterns still match only the original files. Running the same month twice skips the download (the file already exists), and downloads and cleaned files are written to a `.part` file and renamed only when complete. The load deletes the month's rows and inserts the new ones in one transaction. For `2026-08` the `load_month` log should show `deleted 3336715 rows, inserted 3336715 rows` on every run. Check the table:
+```powershell
+docker exec -it docker-postgres-1 psql -U <user> -d <db> -c "SELECT source_month, COUNT(*), COUNT(*) FILTER (WHERE is_reversal) AS reversals FROM clean_yellow_trips GROUP BY 1 ORDER BY 1;"
+```
 
 The Airflow containers reach the project Postgres (the one from step 4, which must be running) through `host.docker.internal:5433`, the host port, with credentials from `airflow/.env` as `PROJECT_PG_USER`, `PROJECT_PG_PASSWORD` and `PROJECT_PG_DB`. The service name `postgres` cannot be used here: inside the Airflow Compose project it is Airflow's own metadata database. The compose file passes these values to the containers with the `PROJECT_PG_*` lines under `environment:` and uses `image: airflow-custom:3.3.0` with `build: .`. Check the route from the worker (expected: `(3336715,)`):
 ```powershell

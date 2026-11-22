@@ -9,7 +9,7 @@ INSERT INTO clean_yellow_trips (
     fare_amount, extra, mta_tax, tip_amount, tolls_amount,
     improvement_surcharge, total_amount, congestion_surcharge,
     airport_fee, cbd_congestion_fee, request_source,
-    has_passenger_count, is_reversal
+    has_passenger_count, is_reversal, source_month
 )
 SELECT
     vendorid, tpep_pickup_datetime, tpep_dropoff_datetime,
@@ -21,7 +21,8 @@ SELECT
     congestion_surcharge::NUMERIC(10,2), airport_fee::NUMERIC(10,2),
     cbd_congestion_fee::NUMERIC(10,2), request_source,
     (passenger_count IS NOT NULL) AS has_passenger_count,
-    (fare_amount < 0 OR total_amount < 0) AS is_reversal
+    (fare_amount < 0 OR total_amount < 0) AS is_reversal,
+    '2026-08' AS source_month,
 FROM staging_yellow_trips
 WHERE tpep_pickup_datetime >= '2020-01-01';
 
