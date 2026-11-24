@@ -1,15 +1,21 @@
 import os
 import shutil
+import json
+import urllib.error
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import DAG
 
 BASE_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data"
 DOWNLOAD_DIR = "/opt/airflow/data/downloads"
 CLEAN_DIR = "/opt/airflow/data/clean"
 MIN_BYTES = 1_000_000
+POKE_INTERVAL = 6 * 3600
+SENSOR_TIMEOUT = 14 * 24 * 3600
+ALERT_LOG = "/opt/airflow/data/alerts.log"
 
 
 def source_path(month):
@@ -49,6 +55,38 @@ def validate_file(month):
     if head != b"PAR1" or tail != b"PAR1":
         raise ValueError(f"{target} is not a valid Parquet file")
     print(f"{target} looks valid: {size} bytes")
+
+
+def file_published(month):
+    target = source_path(month)
+    if os.path.exists(target) and os.path.getsize(target) > 0:
+        print(f"{target} already downloaded")
+        return True
+    url = f"{BASE_URL}/yellow_tripdata_{month}.parquet"
+    request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(request) as response:
+            print(f"{url} is published (HTTP {response.status})")
+            return True
+    except urllib.error.HTTPError as err:
+        if err.code in (403, 404):
+            print(f"{url} not published yet (HTTP {err.code})")
+            return False
+        raise
+
+
+def notify_failure(context):
+    ti = context.get("task_instance")
+    record = {
+        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "dag_id": getattr(ti, "dag_id", None),
+        "task_id": getattr(ti, "task_id", None),
+        "run_id": context.get("run_id"),
+        "error": str(context.get("exception")),
+    }
+    with open(ALERT_LOG, "a") as f:
+        f.write(json.dumps(record) + "\n")
+    print("ALERT written:", record)
 
 
 def transform_month(month):
@@ -136,7 +174,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     params={"month": ""},
-    default_args={"retries": 2, "retry_delay": timedelta(seconds=20)},
+    default_args={"retries": 2, "retry_delay": timedelta(seconds=20), "on_failure_callback": notify_failure},
 ) as dag:
     month_arg = {"month": "{{ params.month or data_interval_start.strftime('%Y-%m') }}"}
     download = PythonOperator(task_id="download_month", python_callable=download_month, op_kwargs=month_arg)
@@ -144,4 +182,13 @@ with DAG(
     transform = PythonOperator(task_id="transform_month", python_callable=transform_month, op_kwargs=month_arg)
     load = PythonOperator(task_id="load_month", python_callable=load_month, op_kwargs=month_arg)
 
-    download >> validate >> transform >> load
+    wait = PythonSensor(
+        task_id="wait_for_file",
+        python_callable=file_published,
+        op_kwargs=month_arg,
+        mode="reschedule",
+        poke_interval=POKE_INTERVAL,
+        timeout=SENSOR_TIMEOUT,
+    )
+
+    wait >> download >> validate >> transform >> load

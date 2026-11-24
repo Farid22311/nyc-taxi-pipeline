@@ -6,6 +6,21 @@ An end-to-end data pipeline on NYC TLC Yellow Taxi trip data (in progress), buil
 
 NYC TLC Yellow Taxi trips, monthly Parquet files, free and public, the files are not stored in the repo.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    TLC["TLC monthly Parquet files"]
+    subgraph Airflow["Airflow: taxi_pipeline (monthly)"]
+        W["wait_for_file (sensor)"] --> D["download_month"] --> V["validate_file"] --> T["transform_month (pandas)"] --> L["load_month (delete, then insert by source_month)"]
+    end
+    TLC --> W
+    L --> PG[("Postgres: clean_yellow_trips")]
+    PG --> Q["SQL queries q01 to q06"]
+    TLC --> S["PySpark jobs: clean, aggregate, benchmark"]
+    S --> P["Parquet partitioned by pickup date"]
+```
+
 ## Planned stack
 
 * Docker / Compose: runs the services (Postgres, Airflow), so the setup works the same on any machine.
