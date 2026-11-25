@@ -33,7 +33,7 @@ flowchart LR
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
 - Week 3 (done): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark and a 4 GB memory test compare Spark with pandas.
-- Airflow (in progress): Airflow 3.3.0 on a custom image (pandas, pyarrow, psycopg) in Docker Compose (`airflow/`). The `taxi_pipeline` DAG downloads, validates, transforms (pandas) and loads (delete then insert by `source_month`) one month at a time, with retries (`retries=2`, `retry_delay=20s`). It is scheduled monthly (`@monthly`) and was backfilled for 2026-05 to 2026-08; the load maps columns by name, so a month whose file lacks a column still loads. `retry_demo` shows a task failing once and succeeding on the retry.
+- Airflow (in progress): Airflow 3.3.0 on a custom image (pandas, pyarrow, psycopg) in Docker Compose (`airflow/`). The `taxi_pipeline` DAG downloads, validates, transforms (pandas) and loads (delete then insert by `source_month`) one month at a time, with retries (`retries=2`, `retry_delay=20s`), a sensor that waits for the month's file, and an alert log for failed tasks. It is scheduled monthly (`@monthly`) and was backfilled for 2026-05 to 2026-08; the load maps columns by name, so a month whose file lacks a column still loads. `retry_demo` shows a task failing once and succeeding on the retry.
 
 ## Repo structure
 
@@ -299,7 +299,11 @@ docker compose exec airflow-scheduler airflow backfill create --dag-id taxi_pipe
 ```
 `--dry-run` lists the dates without creating runs. `--reprocess-behavior none` skips any date that already has a run, `failed` re-runs only failed runs, and `completed` re-runs everything (use it after changing the transform rules). Running the same backfill twice creates no new runs, and a re-run month gives the same rows, because the load deletes the month and inserts it in one transaction.
 
-The scheduler also creates a run for the latest finished month. TLC publishes a month about two months late, so that run can fail with a 404; a sensor that waits for the file is the planned fix.
+The scheduler also creates a run for the latest finished month, and TLC publishes a month about two months late. The first task, `wait_for_file`, is a sensor (`mode="reschedule"`): every 6 hours it sends a `HEAD` request for the month's file and lets the run continue once the file exists (it passes at once if the file is already in `data/downloads/`). HTTP 403 and 404 count as "not published yet", any other error fails the task. After 14 days without the file the sensor times out, and the timeout is not retried.
+
+When a task fails for good (after its retries), a callback appends one JSON line (time, DAG, task, run, error) to `data/alerts.log`. I tested both with the month `2099-01` and short timers: the sensor waited, timed out after 125 seconds against a 120 second limit, and the alert line was written.
+
+Limitation: `max_active_runs=1`, so a run waiting for a late file also holds up the next month's run. A cleaner design shifts the target month back by TLC's usual delay, so the sensor is only a safety net; I have not built that because it changes how backfill dates map to months.
 
 The Airflow containers reach the project Postgres (the one from step 4, which must be running) through `host.docker.internal:5433`, the host port, with credentials from `airflow/.env` as `PROJECT_PG_USER`, `PROJECT_PG_PASSWORD` and `PROJECT_PG_DB`. The service name `postgres` cannot be used here: inside the Airflow Compose project it is Airflow's own metadata database. The compose file passes these values to the containers with the `PROJECT_PG_*` lines under `environment:` and uses `image: airflow-custom:3.3.0` with `build: .`. Check the route from the worker (expected: `(3336715,)`):
 ```powershell

@@ -1,6 +1,6 @@
+import json
 import os
 import shutil
-import json
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import DAG
+from taxi_rules import check_parquet_file, clean_frame, is_not_published_status
 
 BASE_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data"
 DOWNLOAD_DIR = "/opt/airflow/data/downloads"
@@ -45,15 +46,7 @@ def download_month(month):
 
 def validate_file(month):
     target = source_path(month)
-    size = os.path.getsize(target)
-    if size < MIN_BYTES:
-        raise ValueError(f"{target} is only {size} bytes")
-    with open(target, "rb") as f:
-        head = f.read(4)
-        f.seek(-4, os.SEEK_END)
-        tail = f.read(4)
-    if head != b"PAR1" or tail != b"PAR1":
-        raise ValueError(f"{target} is not a valid Parquet file")
+    size = check_parquet_file(target, MIN_BYTES)
     print(f"{target} looks valid: {size} bytes")
 
 
@@ -69,7 +62,7 @@ def file_published(month):
             print(f"{url} is published (HTTP {response.status})")
             return True
     except urllib.error.HTTPError as err:
-        if err.code in (403, 404):
+        if is_not_published_status(err.code):
             print(f"{url} not published yet (HTTP {err.code})")
             return False
         raise
@@ -95,11 +88,7 @@ def transform_month(month):
     os.makedirs(CLEAN_DIR, exist_ok=True)
     df = pd.read_parquet(source_path(month), dtype_backend="pyarrow")
     raw_rows = len(df)
-    df = df[df["tpep_pickup_datetime"] >= pd.Timestamp("2020-01-01")]
-    df = df.assign(
-        has_passenger_count=df["passenger_count"].notna(),
-        is_reversal=(df["fare_amount"] < 0) | (df["total_amount"] < 0),
-    )
+    df = clean_frame(df)
     out = clean_path(month)
     tmp = out + ".part"
     df.to_parquet(tmp, index=False)
@@ -177,11 +166,6 @@ with DAG(
     default_args={"retries": 2, "retry_delay": timedelta(seconds=20), "on_failure_callback": notify_failure},
 ) as dag:
     month_arg = {"month": "{{ params.month or data_interval_start.strftime('%Y-%m') }}"}
-    download = PythonOperator(task_id="download_month", python_callable=download_month, op_kwargs=month_arg)
-    validate = PythonOperator(task_id="validate_file", python_callable=validate_file, op_kwargs=month_arg)
-    transform = PythonOperator(task_id="transform_month", python_callable=transform_month, op_kwargs=month_arg)
-    load = PythonOperator(task_id="load_month", python_callable=load_month, op_kwargs=month_arg)
-
     wait = PythonSensor(
         task_id="wait_for_file",
         python_callable=file_published,
@@ -190,5 +174,9 @@ with DAG(
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
+    download = PythonOperator(task_id="download_month", python_callable=download_month, op_kwargs=month_arg)
+    validate = PythonOperator(task_id="validate_file", python_callable=validate_file, op_kwargs=month_arg)
+    transform = PythonOperator(task_id="transform_month", python_callable=transform_month, op_kwargs=month_arg)
+    load = PythonOperator(task_id="load_month", python_callable=load_month, op_kwargs=month_arg)
 
     wait >> download >> validate >> transform >> load
