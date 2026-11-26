@@ -38,7 +38,14 @@ The load deletes the month's rows and inserts the new ones in one transaction, s
 
 The Spark aggregation writes one folder per pickup date. A query for Aug 19 to 21 reads 3 of 32 folders:
 
-![Partition folders in output/trips_by_date](docs/images/partitions.png)
+output/trips_by_date/
+  pickup_date=2026-07-31
+  pickup_date=2026-08-01
+  pickup_date=2026-08-02
+  ...
+  pickup_date=2026-08-30
+  pickup_date=2026-08-31
+(32 folders)
 
 Trips per hour in August 2026 (q01): the busiest hour is 18 (235,723 trips) and the quietest is 4 (31,023).
 
