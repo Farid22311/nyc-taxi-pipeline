@@ -1,4 +1,5 @@
 # nyc-taxi-pipeline
+![tests](https://github.com/Farid22311/nyc-taxi-pipeline/actions/workflows/tests.yml/badge.svg)
 
 An end-to-end data pipeline on NYC TLC Yellow Taxi trip data (in progress), built to learn and demonstrate core data engineering tools.
 
