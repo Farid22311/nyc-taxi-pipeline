@@ -223,3 +223,5 @@ data/
 output/
 
 airflow/logs/
+
+airflow/config/
