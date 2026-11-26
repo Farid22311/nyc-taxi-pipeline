@@ -225,3 +225,7 @@ output/
 airflow/logs/
 
 airflow/config/
+
+dbt/taxi_dbt/logs/
+dbt/taxi_dbt/target/
+dbt/taxi_dbt/dbt_packages/
