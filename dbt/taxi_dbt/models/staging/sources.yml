@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: taxi
+    schema: public
+    tables:
+      - name: clean_yellow_trips
+        description: "Cleaned Yellow Taxi trips, loaded by the Airflow taxi_pipeline DAG (one file month at a time)."
