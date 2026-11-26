@@ -21,19 +21,49 @@ flowchart LR
     S --> P["Parquet partitioned by pickup date"]
 ```
 
-## Planned stack
+## Results
 
-* Docker / Compose: runs the services (Postgres, Airflow), so the setup works the same on any machine.
+Airflow runs the `taxi_pipeline` DAG monthly. The graph shows the five tasks, all green for one month:
+
+![Airflow graph of taxi_pipeline, all tasks green](docs/images/airflow_graph.png)
+
+The run history includes a deliberately failed run for the month `2099-01`, which does not exist. I used it to test the sensor timeout and the alert log:
+
+![Airflow run history with the failed 2099-01 run](docs/images/airflow_runs.png)
+
+The load deletes the month's rows and inserts the new ones in one transaction, so a rerun gives the same counts. The log line shows both numbers:
+
+![load_month log line with deleted and inserted counts](docs/images/load_month_log.png)
+
+The Spark aggregation writes one folder per pickup date. A query for Aug 19 to 21 reads 3 of 32 folders:
+
+![Partition folders in output/trips_by_date](docs/images/partitions.png)
+
+Trips per hour in August 2026 (q01): the busiest hour is 18 (235,723 trips) and the quietest is 4 (31,023).
+
+![Trips per hour, August 2026](docs/images/trips_per_hour.png)
+
+Daily revenue in August 2026 (q05, reversals excluded). Aug 20 is a spike at $4,327,427.23. q06 shows it is mainly more trips (+30%), not higher fares.
+
+![Daily revenue, August 2026](docs/images/daily_revenue.png)
+
+The charts are made by `scripts/make_charts.py` from the q01 and q05 results.
+
+## Stack
+
+* Docker / Compose: runs the services (Postgres, Spark, Airflow), so the setup works the same on any machine.
 * Postgres: the database where the data is stored and queried with SQL.
 * PySpark: processes large amounts of data, used to clean and aggregate the data.
 * Airflow: schedules and runs the pipeline steps automatically.
+* pytest and GitHub Actions: test the cleaning rules and run the tests on every push.
 
 ## Status
 
 - Week 1 (done): Postgres running via Docker Compose; raw August 2026 file loaded into a staging table (3,336,716 rows)
 - Week 2 (done): clean table designed and loaded (3,336,715 rows); six analytical queries (q01 to q06); loader runs in a Docker container
 - Week 3 (done): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark and a 4 GB memory test compare Spark with pandas.
-- Airflow (in progress): Airflow 3.3.0 on a custom image (pandas, pyarrow, psycopg) in Docker Compose (`airflow/`). The `taxi_pipeline` DAG downloads, validates, transforms (pandas) and loads (delete then insert by `source_month`) one month at a time, with retries (`retries=2`, `retry_delay=20s`), a sensor that waits for the month's file, and an alert log for failed tasks. It is scheduled monthly (`@monthly`) and was backfilled for 2026-05 to 2026-08; the load maps columns by name, so a month whose file lacks a column still loads. `retry_demo` shows a task failing once and succeeding on the retry.
+- Airflow (done): Airflow 3.3.0 on a custom image (pandas, pyarrow, psycopg) in Docker Compose (`airflow/`). The `taxi_pipeline` DAG downloads, validates, transforms (pandas) and loads (delete then insert by `source_month`) one month at a time, with retries (`retries=2`, `retry_delay=20s`), a sensor that waits for the month's file, and an alert log for failed tasks. It is scheduled monthly (`@monthly`) and was backfilled for 2026-05 to 2026-08; the load maps columns by name, so a month whose file lacks a column still loads. `retry_demo` shows a task failing once and succeeding on the retry.
+- Tests (done): the cleaning rules and file checks live in `airflow/dags/taxi_rules.py` and are covered by 14 pytest tests that run in GitHub Actions on every push (see Tests).
 
 ## Repo structure
 
@@ -42,11 +72,17 @@ docker/              docker-compose.yml (Postgres, loader, Spark), Dockerfile.lo
 airflow/             Airflow's own docker-compose.yaml (official file, example DAGs off)
 airflow/Dockerfile   custom image: pandas, pyarrow, psycopg (versions in airflow/requirements.txt)
 airflow/dags/        DAGs: hello_dag, taxi_pipeline, retry_demo
-scripts/             load_data.py (Parquet -> staging table)
+airflow/dags/taxi_rules.py  cleaning rules and file checks used by taxi_pipeline (no Airflow code, so it is easy to test)
+scripts/             load_data.py (Parquet -> staging table), make_charts.py (README charts)
+docs/images/         screenshots and charts used in this README
 spark_jobs/          PySpark jobs: 00_hello, 01_clean, 02_aggregate, 03_benchmark, 04_memory_test
 sql/                 create_staging, create_clean, alter_clean, alter_clean_source_month, load_clean
 sql/checks/          one-off queries I used to investigate the data and decide the cleaning rules
 sql/queries/         analytical queries q01 to q06
+tests/               pytest tests for taxi_rules.py
+pytest.ini           pytest settings
+requirements-dev.txt test dependencies
+.github/workflows/tests.yml  GitHub Actions: runs pytest on every push
 data/                local Parquet files (not committed)
 data/downloads/      files downloaded by Airflow (not committed)
 data/clean/          cleaned files written by the Airflow DAG (not committed)
@@ -132,6 +168,21 @@ Same 5 files, but all 24 columns, one tool per run, inside a container capped at
 | Spark, 4 GB cap | 15.7s, same results (18,597,780 trips, $574,906,761.04) |
 
 Spark finished under the cap because it reads only the columns the query uses: the plan's `ReadSchema` has 3 of 24 columns (column pruning). pandas loaded all 24 only because I did not pass `columns=`, and on 3 columns it ran in about 2 seconds in the Day 16 benchmark. So the lesson is that Spark prunes columns for you and pandas needs them selected explicitly. The extra pandas memory is likely copies during `concat` and the filter, which I did not measure.
+
+## Tests
+
+The cleaning rules and the file checks are plain functions in `airflow/dags/taxi_rules.py`: `clean_frame` (the cleaning rules), `check_parquet_file` (validation) and `is_not_published_status` (which HTTP statuses mean "not published yet"). `tests/test_taxi_rules.py` tests them with 14 tests.
+
+Run from the repo root with the virtual environment active:
+```powershell
+pip install -r requirements-dev.txt
+pytest -v
+```
+GitHub Actions runs the same `pytest -v` on Python 3.13 on every push.
+
+The tests use small hand-made tables of a few rows, each built to trigger one rule. <!-- TODO Ahmed: one sentence on why, in your words -->
+
+Not covered by automated tests: the Postgres load (checked by rerunning a month and comparing the `deleted` and `inserted` counts in the log), the DAG wiring, and the sensor's timing (checked by hand with the `2099-01` run).
 
 ## Open questions
 
