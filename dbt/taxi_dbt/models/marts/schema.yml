@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: mart_trips_per_hour
+    description: "Trips and gross revenue per pickup hour and file month. Reversals excluded."
+    columns:
+      - name: source_month
+        data_tests: [not_null]
+      - name: pickup_hour
+        data_tests: [not_null]
+  - name: mart_daily_revenue
+    description: "Trips and gross revenue per pickup date and file month. Reversals excluded."
+    columns:
+      - name: source_month
+        data_tests: [not_null]
+      - name: pickup_date
+        data_tests: [not_null]
