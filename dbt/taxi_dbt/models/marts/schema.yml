@@ -15,3 +15,11 @@ models:
         data_tests: [not_null]
       - name: pickup_date
         data_tests: [not_null]
+
+  - name: mart_zone_revenue
+    description: "Trips and gross revenue per pickup zone and file month. Reversals excluded."
+    columns:
+      - name: source_month
+        data_tests: [not_null]
+      - name: pickup_zone_id
+        data_tests: [not_null]

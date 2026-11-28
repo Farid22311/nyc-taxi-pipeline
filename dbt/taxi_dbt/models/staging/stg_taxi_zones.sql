@@ -1,0 +1,8 @@
+{{ config(materialized='view') }}
+
+select
+    "LocationID"::int as zone_id,
+    "Borough"         as borough,
+    "Zone"            as zone_name,
+    service_zone
+from {{ ref('taxi_zone_lookup') }}

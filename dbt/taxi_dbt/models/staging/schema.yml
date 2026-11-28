@@ -14,3 +14,9 @@ models:
       - name: is_reversal
         data_tests:
           - not_null
+
+  - name: stg_taxi_zones
+    description: "TLC taxi zone lookup (seed), columns renamed only."
+    columns:
+      - name: zone_id
+        data_tests: [unique, not_null]
