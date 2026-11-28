@@ -18,6 +18,9 @@ flowchart LR
     TLC --> W
     L --> PG[("Postgres: clean_yellow_trips")]
     PG --> Q["SQL queries q01 to q06"]
+    Z["taxi_zone_lookup (dbt seed)"] --> DBT
+    PG --> DBT["dbt: staging views + tests"]
+    DBT --> M["marts: trips per hour, daily revenue, zone revenue"]
     TLC --> S["PySpark jobs: clean, aggregate, benchmark"]
     S --> P["Parquet partitioned by pickup date"]
 ```
@@ -38,6 +41,7 @@ The load deletes the month's rows and inserts the new ones in one transaction, s
 
 The Spark aggregation writes one folder per pickup date. A query for Aug 19 to 21 reads 3 of 32 folders:
 
+```
 output/trips_by_date/
   pickup_date=2026-07-31
   pickup_date=2026-08-01
@@ -46,6 +50,7 @@ output/trips_by_date/
   pickup_date=2026-08-30
   pickup_date=2026-08-31
 (32 folders)
+```
 
 Trips per hour in August 2026 (q01): the busiest hour is 18 (235,723 trips) and the quietest is 4 (31,023).
 
@@ -57,12 +62,17 @@ Daily revenue in August 2026 (q05, reversals excluded). Aug 20 is a spike at $4,
 
 The charts are made by `scripts/make_charts.py` from the q01 and q05 results.
 
+The dbt models sit on top of `clean_yellow_trips`. The lineage graph from `dbt docs` shows the source, the two staging models, the three marts and the revenue test:
+
+![dbt lineage graph](docs/images/dbt_lineage.png)
+
 ## Stack
 
 * Docker / Compose: runs the services (Postgres, Spark, Airflow), so the setup works the same on any machine.
 * Postgres: the database where the data is stored and queried with SQL.
 * PySpark: processes large amounts of data, used to clean and aggregate the data.
 * Airflow: schedules and runs the pipeline steps automatically.
+* dbt (Postgres adapter): builds the analytics models on top of the clean table and tests them.
 * pytest and GitHub Actions: test the cleaning rules and run the tests on every push.
 
 ## Status
@@ -72,6 +82,7 @@ The charts are made by `scripts/make_charts.py` from the q01 and q05 results.
 - Week 3 (done): PySpark in a container. The cleaning job matches the Postgres clean table, the aggregation job writes output partitioned by pickup date, and a benchmark and a 4 GB memory test compare Spark with pandas.
 - Airflow (done): Airflow 3.3.0 on a custom image (pandas, pyarrow, psycopg) in Docker Compose (`airflow/`). The `taxi_pipeline` DAG downloads, validates, transforms (pandas) and loads (delete then insert by `source_month`) one month at a time, with retries (`retries=2`, `retry_delay=20s`), a sensor that waits for the month's file, and an alert log for failed tasks. It is scheduled monthly (`@monthly`) and was backfilled for 2026-05 to 2026-08; the load maps columns by name, so a month whose file lacks a column still loads. `retry_demo` shows a task failing once and succeeding on the retry.
 - Tests (done): the cleaning rules and file checks live in `airflow/dags/taxi_rules.py` and are covered by 14 pytest tests that run in GitHub Actions on every push (see Tests).
+- dbt (done): `dbt/taxi_dbt` has a source, two staging views, three mart tables, a zone lookup seed and 13 data tests; `dbt build` passes (19 of 19). See dbt.
 
 ## Repo structure
 
@@ -91,6 +102,8 @@ tests/               pytest tests for taxi_rules.py
 pytest.ini           pytest settings
 requirements-dev.txt test dependencies
 .github/workflows/tests.yml  GitHub Actions: runs pytest on every push
+dbt/taxi_dbt/        dbt project: models/staging, models/marts, seeds/taxi_zone_lookup.csv, tests/
+requirements-dbt.txt pinned dbt versions
 data/                local Parquet files (not committed)
 data/downloads/      files downloaded by Airflow (not committed)
 data/clean/          cleaned files written by the Airflow DAG (not committed)
@@ -176,6 +189,46 @@ Same 5 files, but all 24 columns, one tool per run, inside a container capped at
 | Spark, 4 GB cap | 15.7s, same results (18,597,780 trips, $574,906,761.04) |
 
 Spark finished under the cap because it reads only the columns the query uses: the plan's `ReadSchema` has 3 of 24 columns (column pruning). pandas loaded all 24 only because I did not pass `columns=`, and on 3 columns it ran in about 2 seconds in the Day 16 benchmark. So the lesson is that Spark prunes columns for you and pandas needs them selected explicitly. The extra pandas memory is likely copies during `concat` and the filter, which I did not measure.
+
+## dbt
+
+Airflow loads and cleans the data into `clean_yellow_trips`. dbt starts from that table and builds the analytics layer on top, so each tool keeps the job it already did well: the cleaning rules stay in `taxi_rules.py` where pytest covers them, and the models and their tests live in dbt.
+
+| Model | Type | What it is |
+|---|---|---|
+| `stg_yellow_trips` | view | `clean_yellow_trips` with columns renamed only; reversals are kept |
+| `stg_taxi_zones` | view | the TLC zone lookup (seed), columns renamed only |
+| `mart_trips_per_hour` | table | trips and revenue per pickup hour and file month, reversals excluded |
+| `mart_daily_revenue` | table | trips and revenue per pickup date and file month, reversals excluded |
+| `mart_zone_revenue` | table | trips and revenue per pickup zone and file month, with zone names, reversals excluded |
+
+13 data tests: `unique` and `not_null` on `trip_id`; `not_null` on `pickup_at` and `is_reversal`; `unique` and `not_null` on the zone ID; `not_null` on the key columns of every mart; and one singular test, `assert_august_revenue_matches_q04`, which fails if the August revenue in `mart_daily_revenue` differs from 100,779,468.23, the total I verified earlier with the SQL query q04.
+
+Run it from the repo root with the virtual environment active, Postgres running and the password in the `DBT_PG_PASSWORD` variable:
+```powershell
+pip install -r requirements-dbt.txt
+cd dbt\taxi_dbt
+dbt seed
+dbt build
+```
+The connection profile lives in `~/.dbt/profiles.yml`, outside the repo, so no password is committed. It reads the password from the environment:
+```yaml
+taxi_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: localhost
+      port: 5433
+      user: <user>
+      pass: "{{ env_var('DBT_PG_PASSWORD') }}"
+      dbname: <db>
+      schema: analytics
+      threads: 4
+```
+The models are created in the `analytics` schema; the source is `public.clean_yellow_trips`.
+
+Version note: dbt is pinned in `requirements-dbt.txt` to dbt-core 1.13.0b1, a beta. On dbt-core 1.12.7, `dbt build` enabled dbt State on my machine and opened a browser sign-in page before running any model; I did not find a setting that turned it off reliably, so I stayed on the version that runs without it.
 
 ## Tests
 
@@ -370,3 +423,15 @@ docker compose exec airflow-worker python -c "import os, psycopg; c = psycopg.co
 ```
 
 Stop with `docker compose down`. Do not add `--volumes` unless you want to delete Airflow's database and run history.
+
+### 17. dbt
+Postgres must be running and `clean_yellow_trips` must hold at least one month (steps 4 to 8, or the Airflow DAG). Create the profile shown in the dbt section, then:
+```powershell
+pip install -r requirements-dbt.txt
+cd dbt\taxi_dbt
+$env:DBT_PG_PASSWORD = "<your POSTGRES_PASSWORD>"
+dbt debug
+dbt seed
+dbt build
+```
+`dbt debug` should end with `All checks passed!`, and `dbt build` with `ERROR=0`. The zone lookup is a CSV in `dbt/taxi_dbt/seeds/`, downloaded from the TLC trip record page. To browse the models and the lineage graph: `dbt docs generate`, then `dbt docs serve --port 8081` (Airflow uses 8080).
